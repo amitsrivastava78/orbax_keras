@@ -23,11 +23,13 @@ from absl import logging
 from etils import epath
 import numpy as np
 from orbax.checkpoint import checkpoint_args
+from orbax.checkpoint import transform_utils
 from orbax.checkpoint.checkpoint_args import register_with_handler
 from orbax.checkpoint._src.handlers import async_checkpoint_handler
 from orbax.checkpoint._src.handlers import checkpoint_handler
 from orbax.checkpoint._src.handlers import pytree_checkpoint_handler
 from orbax.checkpoint._src.metadata import tree as tree_metadata
+from orbax.checkpoint._src.serialization import type_handlers
 from orbax.checkpoint._src.tree import utils as tree_utils
 
 try:
@@ -46,6 +48,7 @@ class KerasSaveArgs(checkpoint_args.CheckpointArgs):
 class KerasRestoreArgs(checkpoint_args.CheckpointArgs):
   """Arguments for restoring Keras models."""
   item: Any
+  transforms: Optional[Any] = None
 
 
 class KerasCheckpointHandler(async_checkpoint_handler.AsyncCheckpointHandler):
@@ -107,7 +110,15 @@ class KerasCheckpointHandler(async_checkpoint_handler.AsyncCheckpointHandler):
       # For all backends, use PyTreeCheckpointHandler to restore weights
       # Keras 3.0 set_weights() accepts numpy arrays regardless of backend
       pytree_handler = pytree_checkpoint_handler.PyTreeCheckpointHandler()
-      restored_weights = pytree_handler.restore(directory)
+      if args.transforms is not None:
+        # If transforms are provided, we need to specify the target structure
+        # Use the model's current weights as the target structure for transforms
+        target_weights = args.item.get_weights()
+        # Also need to provide restore_args matching the target structure
+        restore_args = [type_handlers.RestoreArgs() for _ in target_weights]
+        restored_weights = pytree_handler.restore(directory, item=target_weights, transforms=args.transforms, restore_args=restore_args)
+      else:
+        restored_weights = pytree_handler.restore(directory)
       # Set weights on the model
       args.item.set_weights(restored_weights)
       return args.item

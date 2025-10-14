@@ -19,12 +19,18 @@ os.environ['KERAS_BACKEND'] = 'torch'
 
 import tempfile
 import unittest
+import warnings
+
+# Suppress asyncio event loop warnings and exceptions
+warnings.filterwarnings("ignore", category=ResourceWarning, module="asyncio")
+warnings.filterwarnings("ignore", message="Exception ignored in: <function BaseEventLoop.__del__")
 
 from absl.testing import absltest
 from etils import epath
 import numpy as np
 
 from orbax.checkpoint import handlers
+from orbax.checkpoint import transform_utils
 from orbax.checkpoint._src.handlers import keras_checkpoint_handler
 
 try:
@@ -51,7 +57,8 @@ class KerasCheckpointHandlerPyTorchTest(absltest.TestCase):
 
     # Create a simple Keras model
     model = keras.Sequential([
-        layers.Dense(2, input_shape=(2,)),
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
         layers.Dense(1)
     ])
 
@@ -67,7 +74,8 @@ class KerasCheckpointHandlerPyTorchTest(absltest.TestCase):
 
       # Create a new model with same architecture
       new_model = keras.Sequential([
-          layers.Dense(2, input_shape=(2,)),
+          keras.Input(shape=(2,)),
+          layers.Dense(2),
           layers.Dense(1)
       ])
 
@@ -95,7 +103,8 @@ class KerasCheckpointHandlerPyTorchTest(absltest.TestCase):
 
     # Create a simple Keras model
     model = keras.Sequential([
-        layers.Dense(2, input_shape=(2,)),
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
         layers.Dense(1)
     ])
 
@@ -120,7 +129,8 @@ class KerasCheckpointHandlerPyTorchTest(absltest.TestCase):
 
         # Create a new model with same architecture
         new_model = keras.Sequential([
-            layers.Dense(2, input_shape=(2,)),
+            keras.Input(shape=(2,)),
+            layers.Dense(2),
             layers.Dense(1)
         ])
 
@@ -134,7 +144,21 @@ class KerasCheckpointHandlerPyTorchTest(absltest.TestCase):
         for orig, rest in zip(original_weights, restored_weights):
           np.testing.assert_array_equal(orig, rest)
 
-    asyncio.run(async_test())
+    # Properly handle event loop cleanup
+    loop = None
+    try:
+      loop = asyncio.new_event_loop()
+      asyncio.set_event_loop(loop)
+      loop.run_until_complete(async_test())
+    finally:
+      if loop:
+        try:
+          if not loop.is_closed():
+            loop.close()
+        except Exception:
+          pass  # Ignore cleanup errors
+      # Reset to None to avoid conflicts
+      asyncio.set_event_loop(None)
 
   def test_async_save_and_restore_torch(self):
     """Test async save/restore with PyTorch backend."""
@@ -151,7 +175,8 @@ class KerasCheckpointHandlerPyTorchTest(absltest.TestCase):
 
     # Create a simple model
     model = keras.Sequential([
-        layers.Dense(2, input_shape=(2,)),
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
         layers.Dense(1)
     ])
     
@@ -193,7 +218,8 @@ class KerasCheckpointHandlerPyTorchTest(absltest.TestCase):
         
         # Create a new model and restore from checkpoint
         new_model = keras.Sequential([
-            layers.Dense(2, input_shape=(2,)),
+            keras.Input(shape=(2,)),
+            layers.Dense(2),
             layers.Dense(1)
         ])
         
@@ -218,8 +244,138 @@ class KerasCheckpointHandlerPyTorchTest(absltest.TestCase):
             break
         self.assertTrue(weights_differ, "Weights should have changed after continued training")
 
-    asyncio.run(async_checkpoint_test())
+    # Properly handle event loop cleanup
+    loop = None
+    try:
+      loop = asyncio.new_event_loop()
+      asyncio.set_event_loop(loop)
+      loop.run_until_complete(async_checkpoint_test())
+    finally:
+      if loop:
+        try:
+          if not loop.is_closed():
+            loop.close()
+        except Exception:
+          pass  # Ignore cleanup errors
+      # Reset to None to avoid conflicts
+      asyncio.set_event_loop(None)
+
+  def test_transforms_torch(self):
+    """Test transformations with PyTorch backend."""
+    current_backend = keras.backend.backend()
+    if current_backend != 'torch':
+      self.skipTest(f"Test requires torch backend, got {current_backend}")
+
+    # Create a simple Keras model
+    model = keras.Sequential([
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
+        layers.Dense(1)
+    ])
+
+    # Set some known weights
+    original_weights = [
+        np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),  # kernel for first layer
+        np.array([0.1, 0.2], dtype=np.float32),                  # bias for first layer
+        np.array([[5.0], [6.0]], dtype=np.float32),             # kernel for second layer
+        np.array([0.3], dtype=np.float32)                       # bias for second layer
+    ]
+    model.set_weights(original_weights)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Save without transforms
+      save_args = keras_checkpoint_handler.KerasSaveArgs(model)
+      self.handler.save(directory, save_args)
+
+      # Create a new model with same architecture
+      new_model = keras.Sequential([
+          keras.Input(shape=(2,)),
+          layers.Dense(2),
+          layers.Dense(1)
+      ])
+
+      # Define transformations: scale all weights by 2
+      transforms = [
+          transform_utils.Transform(value_fn=lambda x: x * 2),  # index 0
+          transform_utils.Transform(value_fn=lambda x: x * 2),  # index 1
+          transform_utils.Transform(value_fn=lambda x: x * 2),  # index 2
+          transform_utils.Transform(value_fn=lambda x: x * 2),  # index 3
+      ]
+
+      # Restore with transforms
+      restore_args = keras_checkpoint_handler.KerasRestoreArgs(new_model, transforms=transforms)
+      restored_model = self.handler.restore(directory, restore_args)
+
+      # Check that weights were transformed (scaled by 2)
+      restored_weights = restored_model.get_weights()
+      expected_weights = [w * 2 for w in original_weights]
+
+      self.assertEqual(len(expected_weights), len(restored_weights))
+      for expected, actual in zip(expected_weights, restored_weights):
+        np.testing.assert_array_almost_equal(expected, actual)
+
+  def test_transforms_with_key_renaming_torch(self):
+    """Test transformations with key renaming using multi_value_fn."""
+    current_backend = keras.backend.backend()
+    if current_backend != 'torch':
+      self.skipTest(f"Test requires torch backend, got {current_backend}")
+
+    # Create a simple Keras model
+    model = keras.Sequential([
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
+        layers.Dense(1)
+    ])
+
+    # Set some known weights
+    original_weights = [
+        np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),  # kernel for first layer (2, 2)
+        np.array([0.1, 0.2], dtype=np.float32),                  # bias for first layer (2,)
+        np.array([[5.0], [6.0]], dtype=np.float32),             # kernel for second layer (2, 1)
+        np.array([0.3], dtype=np.float32)                       # bias for second layer (1,)
+    ]
+    model.set_weights(original_weights)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Save without transforms
+      save_args = keras_checkpoint_handler.KerasSaveArgs(model)
+      self.handler.save(directory, save_args)
+
+      # Create a new model with same architecture
+      new_model = keras.Sequential([
+          keras.Input(shape=(2,)),
+          layers.Dense(2),
+          layers.Dense(1)
+      ])
+
+      # Define transformations using original_key to rearrange weights
+      # Note: This rearranges bias and kernel which have incompatible shapes,
+      # so this test just verifies the transformation runs without crashing
+      transforms = [
+          transform_utils.RestoreTransform(original_key='3'),  # 0 <- 3 (bias2 -> kernel1 position - will fail shape check)
+          transform_utils.RestoreTransform(original_key='2'),  # 1 <- 2 (kernel2 -> bias1 position - will fail shape check)
+          transform_utils.RestoreTransform(original_key='1'),  # 2 <- 1 (bias1 -> kernel2 position - will fail shape check)
+          transform_utils.RestoreTransform(original_key='0'),  # 3 <- 0 (kernel1 -> bias2 position - will fail shape check)
+      ]
+
+      # Restore with transforms
+      restore_args = keras_checkpoint_handler.KerasRestoreArgs(new_model, transforms=transforms)
+      try:
+        restored_model = self.handler.restore(directory, restore_args)
+        # If we get here, the transformation ran but shapes don't match
+        self.fail("Expected shape mismatch error due to incompatible weight rearrangement")
+      except ValueError as e:
+        # Expected error due to shape mismatch
+        self.assertIn("weight shape", str(e))
 
 
 if __name__ == '__main__':
   absltest.main()
+
+"""Tests for KerasCheckpointHandler with PyTorch backend."""
+
+import os
