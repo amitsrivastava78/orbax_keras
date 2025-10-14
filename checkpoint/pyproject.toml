@@ -47,6 +47,8 @@ homepage = 'http://github.com/google/orbax'
 repository = 'http://github.com/google/orbax'
 
 [project.optional-dependencies]
+keras = ["keras >= 3.0.0"]
+torch = ["torch"]
 docs = [
   'flax',
   'google-cloud-logging',

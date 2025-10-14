@@ -56,3 +56,11 @@ from orbax.checkpoint._src.handlers.random_key_checkpoint_handler import NumpyRa
 from orbax.checkpoint._src.handlers.random_key_checkpoint_handler import NumpyRandomKeyRestoreArgs
 from orbax.checkpoint._src.handlers.standard_checkpoint_handler import StandardSaveArgs
 from orbax.checkpoint._src.handlers.standard_checkpoint_handler import StandardRestoreArgs
+
+# Keras support
+try:
+  from orbax.checkpoint._src.handlers.keras_checkpoint_handler import KerasCheckpointHandler
+  from orbax.checkpoint._src.handlers.keras_checkpoint_handler import KerasSaveArgs
+  from orbax.checkpoint._src.handlers.keras_checkpoint_handler import KerasRestoreArgs
+except ImportError:
+  pass
