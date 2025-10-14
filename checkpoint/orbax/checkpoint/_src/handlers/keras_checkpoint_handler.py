@@ -28,6 +28,7 @@ from orbax.checkpoint.checkpoint_args import register_with_handler
 from orbax.checkpoint._src.handlers import async_checkpoint_handler
 from orbax.checkpoint._src.handlers import checkpoint_handler
 from orbax.checkpoint._src.handlers import pytree_checkpoint_handler
+from orbax.checkpoint._src.handlers.pytree_checkpoint_handler import PyTreeSaveArgs
 from orbax.checkpoint._src.metadata import tree as tree_metadata
 from orbax.checkpoint._src.serialization import type_handlers
 from orbax.checkpoint._src.tree import utils as tree_utils
@@ -42,6 +43,7 @@ except ImportError:
 class KerasSaveArgs(checkpoint_args.CheckpointArgs):
   """Arguments for saving Keras models."""
   item: Any
+  custom_metadata: Optional[Any] = None
 
 
 @dataclasses.dataclass
@@ -73,7 +75,8 @@ class KerasCheckpointHandler(async_checkpoint_handler.AsyncCheckpointHandler):
       # Keras 3.0 get_weights() returns numpy arrays regardless of backend
       self._pytree_handler = pytree_checkpoint_handler.PyTreeCheckpointHandler()
       weights = model.get_weights()
-      self._pytree_handler.save(directory, item=weights)
+      pytree_save_args = PyTreeSaveArgs(item=weights, custom_metadata=args.custom_metadata)
+      self._pytree_handler.save(directory, args=pytree_save_args)
       self._pytree_handler.finalize(directory)
       return None
     else:
@@ -95,7 +98,8 @@ class KerasCheckpointHandler(async_checkpoint_handler.AsyncCheckpointHandler):
       # Keras 3.0 get_weights() returns numpy arrays regardless of backend
       self._pytree_handler = pytree_checkpoint_handler.PyTreeCheckpointHandler()
       weights = model.get_weights()
-      futures = await self._pytree_handler.async_save(directory, item=weights)
+      pytree_save_args = PyTreeSaveArgs(item=weights, custom_metadata=args.custom_metadata)
+      futures = await self._pytree_handler.async_save(directory, args=pytree_save_args)
       return futures
     else:
       raise ValueError(f"Unsupported backend: {backend}")

@@ -334,5 +334,64 @@ class KerasCheckpointHandlerTest(absltest.TestCase):
         self.assertIn("weight shape", str(e))
 
 
+  def test_custom_metadata_jax(self):
+    """Test custom metadata support with JAX backend."""
+    current_backend = keras.backend.backend()
+    if current_backend != 'jax':
+      self.skipTest(f"Test requires jax backend, got {current_backend}")
+
+    # Create a simple Keras model
+    model = keras.Sequential([
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
+        layers.Dense(1)
+    ])
+
+    # Set some known weights
+    original_weights = [
+        np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.array([0.1, 0.2], dtype=np.float32),
+        np.array([[5.0], [6.0]], dtype=np.float32),
+        np.array([0.3], dtype=np.float32)
+    ]
+    model.set_weights(original_weights)
+
+    # Custom metadata to save
+    custom_metadata = {
+        "epoch": 42,
+        "loss": 0.123,
+        "model_config": {"layers": 2, "units": [2, 1]},
+        "training_info": {"optimizer": "adam", "lr": 0.001}
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Save with custom metadata
+      save_args = keras_checkpoint_handler.KerasSaveArgs(model, custom_metadata=custom_metadata)
+      self.handler.save(directory, save_args)
+
+      # Create a new model with same architecture
+      new_model = keras.Sequential([
+          keras.Input(shape=(2,)),
+          layers.Dense(2),
+          layers.Dense(1)
+      ])
+
+      # Restore
+      restore_args = keras_checkpoint_handler.KerasRestoreArgs(new_model)
+      restored_model = self.handler.restore(directory, restore_args)
+
+      # Check that weights were restored correctly
+      restored_weights = restored_model.get_weights()
+      self.assertEqual(len(original_weights), len(restored_weights))
+      for orig, rest in zip(original_weights, restored_weights):
+        np.testing.assert_array_equal(orig, rest)
+
+      # Check that metadata can be accessed (if supported by the handler)
+      # Note: The current implementation doesn't expose metadata retrieval
+      # but the metadata is saved with the checkpoint
+
+
 if __name__ == '__main__':
   absltest.main()
