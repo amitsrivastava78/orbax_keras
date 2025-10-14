@@ -24,8 +24,9 @@ from absl.testing import absltest
 from etils import epath
 import numpy as np
 
-from orbax.checkpoint import handlers
+from orbax.checkpoint import options as options_lib
 from orbax.checkpoint import transform_utils
+from orbax.checkpoint import type_handlers
 from orbax.checkpoint._src.handlers import keras_checkpoint_handler
 
 try:
@@ -438,6 +439,460 @@ class KerasCheckpointHandlerTensorFlowTest(absltest.TestCase):
       self.assertEqual(len(original_weights), len(restored_weights))
       for orig, rest in zip(original_weights, restored_weights):
         np.testing.assert_array_equal(orig, rest)
+
+
+  def test_enhanced_restore_args_tf(self):
+    """Test enhanced restore args support with TensorFlow backend."""
+    current_backend = keras.backend.backend()
+    if current_backend != 'tensorflow':
+      self.skipTest(f"Test requires tensorflow backend, got {current_backend}")
+
+    # Create a simple Keras model
+    model = keras.Sequential([
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
+        layers.Dense(1)
+    ])
+
+    # Set some known weights
+    original_weights = [
+        np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.array([0.1, 0.2], dtype=np.float32),
+        np.array([[5.0], [6.0]], dtype=np.float32),
+        np.array([0.3], dtype=np.float32)
+    ]
+    model.set_weights(original_weights)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Save without enhanced args
+      save_args = keras_checkpoint_handler.KerasSaveArgs(model)
+      self.handler.save(directory, save_args)
+
+      # Create a new model with same architecture
+      new_model = keras.Sequential([
+          keras.Input(shape=(2,)),
+          layers.Dense(2),
+          layers.Dense(1)
+      ])
+
+      # Test with custom restore_args
+      custom_restore_args = [
+          type_handlers.RestoreArgs(),  # Default for weight 0
+          type_handlers.RestoreArgs(),  # Default for weight 1
+          type_handlers.RestoreArgs(),  # Default for weight 2
+          type_handlers.RestoreArgs()   # Default for weight 3
+      ]
+
+      restore_args = keras_checkpoint_handler.KerasRestoreArgs(
+          new_model, 
+          restore_args=custom_restore_args,
+          transforms_default_to_original=True
+      )
+      restored_model = self.handler.restore(directory, restore_args)
+
+      # Check that weights were restored correctly
+      restored_weights = restored_model.get_weights()
+      self.assertEqual(len(original_weights), len(restored_weights))
+      for orig, rest in zip(original_weights, restored_weights):
+        np.testing.assert_array_equal(orig, rest)
+
+
+  def test_multihost_checkpointing_tf(self):
+    """Test multi-host checkpointing support with TensorFlow backend."""
+    current_backend = keras.backend.backend()
+    if current_backend != 'tensorflow':
+      self.skipTest(f"Test requires tensorflow backend, got {current_backend}")
+
+    # Create a simple Keras model
+    model = keras.Sequential([
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
+        layers.Dense(1)
+    ])
+
+    # Set some known weights
+    original_weights = [
+        np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.array([0.1, 0.2], dtype=np.float32),
+        np.array([[5.0], [6.0]], dtype=np.float32),
+        np.array([0.3], dtype=np.float32)
+    ]
+    model.set_weights(original_weights)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Test 1: Primary host (process 0) configuration
+      multiprocessing_options_primary = options_lib.MultiprocessingOptions(
+          primary_host=0,
+          active_processes={0, 1, 2}
+      )
+      handler_primary = keras_checkpoint_handler.KerasCheckpointHandler(
+          multiprocessing_options=multiprocessing_options_primary
+      )
+
+      # Verify primary host is correctly identified
+      self.assertTrue(handler_primary._multiprocessing_options.primary_host == 0)
+      self.assertEqual(handler_primary._multiprocessing_options.active_processes, {0, 1, 2})
+
+      # Test 2: Non-primary host (process 1) configuration
+      multiprocessing_options_secondary = options_lib.MultiprocessingOptions(
+          primary_host=0,
+          active_processes={0, 1, 2}
+      )
+      handler_secondary = keras_checkpoint_handler.KerasCheckpointHandler(
+          multiprocessing_options=multiprocessing_options_secondary
+      )
+
+      # Both handlers should have same configuration
+      self.assertEqual(handler_primary._multiprocessing_options.primary_host,
+                      handler_secondary._multiprocessing_options.primary_host)
+      self.assertEqual(handler_primary._multiprocessing_options.active_processes,
+                      handler_secondary._multiprocessing_options.active_processes)
+
+      # Test 3: Save operation with primary host handler
+      save_args = keras_checkpoint_handler.KerasSaveArgs(model)
+      handler_primary.save(directory, save_args)
+
+      # Test 4: Restore operation with secondary host handler
+      new_model = keras.Sequential([
+          keras.Input(shape=(2,)),
+          layers.Dense(2),
+          layers.Dense(1)
+      ])
+
+      restore_args = keras_checkpoint_handler.KerasRestoreArgs(new_model)
+      restored_model = handler_secondary.restore(directory, restore_args)
+
+      # Verify that weights were restored correctly across "virtual hosts"
+      restored_weights = restored_model.get_weights()
+      self.assertEqual(len(original_weights), len(restored_weights))
+      for orig, rest in zip(original_weights, restored_weights):
+        np.testing.assert_array_equal(orig, rest)
+
+      # Test 5: Different primary host configuration
+      multiprocessing_options_alt = options_lib.MultiprocessingOptions(
+          primary_host=2,  # Host 2 is primary
+          active_processes={0, 1, 2, 3}
+      )
+      handler_alt = keras_checkpoint_handler.KerasCheckpointHandler(
+          multiprocessing_options=multiprocessing_options_alt
+      )
+
+      self.assertEqual(handler_alt._multiprocessing_options.primary_host, 2)
+      self.assertEqual(handler_alt._multiprocessing_options.active_processes, {0, 1, 2, 3})
+
+      # Test 6: Single host configuration (no multi-host)
+      multiprocessing_options_single = options_lib.MultiprocessingOptions(
+          primary_host=0,
+          active_processes={0}
+      )
+      handler_single = keras_checkpoint_handler.KerasCheckpointHandler(
+          multiprocessing_options=multiprocessing_options_single
+      )
+
+      self.assertEqual(handler_single._multiprocessing_options.primary_host, 0)
+      self.assertEqual(handler_single._multiprocessing_options.active_processes, {0})
+
+
+@unittest.skipIf(not KERAS_AVAILABLE, "Keras not available")
+class KerasCompositeCheckpointHandlerTensorFlowTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.handler = keras_checkpoint_handler.KerasCompositeCheckpointHandler()
+
+  def _test_composite_save_and_restore_with_backend(self, expected_backend):
+    """Helper method to test composite save/restore with a specific backend."""
+    current_backend = keras.backend.backend()
+    if current_backend != expected_backend:
+      self.skipTest(f"Test requires {expected_backend} backend, got {current_backend}")
+
+    # Create multiple Keras models
+    model1 = keras.Sequential([
+        layers.Dense(2, input_shape=(2,)),
+        layers.Dense(1)
+    ])
+    model2 = keras.Sequential([
+        layers.Dense(3, input_shape=(3,)),
+        layers.Dense(2),
+        layers.Dense(1)
+    ])
+
+    # Create some additional objects to save (optimizer state, training metadata)
+    optimizer_state = {'lr': 0.001, 'step': 100}
+    training_metadata = {'epoch': 5, 'loss': 0.123}
+
+    # Store original weights
+    original_weights1 = model1.get_weights()
+    original_weights2 = model2.get_weights()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Save composite checkpoint
+      save_args = keras_checkpoint_handler.KerasCompositeSaveArgs(
+          items={
+              'model1': model1,
+              'model2': model2,
+              'optimizer': optimizer_state,
+              'metadata': training_metadata
+          },
+          custom_metadata={
+              'model1': {'architecture': 'simple_mlp'},
+              'model2': {'architecture': 'deeper_mlp'},
+              'optimizer': {'type': 'adam'},
+              'metadata': {'training_info': True}
+          }
+      )
+      self.handler.save(directory, save_args)
+
+      # Create new models with same architectures for restoration
+      new_model1 = keras.Sequential([
+          layers.Dense(2, input_shape=(2,)),
+          layers.Dense(1)
+      ])
+      new_model2 = keras.Sequential([
+          layers.Dense(3, input_shape=(3,)),
+          layers.Dense(2),
+          layers.Dense(1)
+      ])
+
+      # Restore composite checkpoint
+      restore_args = keras_checkpoint_handler.KerasCompositeRestoreArgs(
+          items={
+              'model1': new_model1,
+              'model2': new_model2,
+              'optimizer': None,  # Will restore to saved structure
+              'metadata': None   # Will restore to saved structure
+          }
+      )
+      restored_items = self.handler.restore(directory, restore_args)
+
+      # Verify models were restored correctly
+      restored_weights1 = restored_items['model1'].get_weights()
+      restored_weights2 = restored_items['model2'].get_weights()
+
+      self.assertEqual(len(original_weights1), len(restored_weights1))
+      for orig, rest in zip(original_weights1, restored_weights1):
+        np.testing.assert_array_equal(orig, rest)
+
+      self.assertEqual(len(original_weights2), len(restored_weights2))
+      for orig, rest in zip(original_weights2, restored_weights2):
+        np.testing.assert_array_equal(orig, rest)
+
+      # Verify other objects were restored correctly
+      self.assertEqual(restored_items['optimizer'], optimizer_state)
+      self.assertEqual(restored_items['metadata'], training_metadata)
+
+  def test_composite_save_and_restore_tf(self):
+    """Test composite save/restore with TensorFlow backend."""
+    self._test_composite_save_and_restore_with_backend('tensorflow')
+
+  def _test_composite_async_save_and_restore_with_backend(self, expected_backend):
+    """Helper method to test async composite save/restore with a specific backend."""
+    import asyncio
+
+    current_backend = keras.backend.backend()
+    if current_backend != expected_backend:
+      self.skipTest(f"Test requires {expected_backend} backend, got {current_backend}")
+
+    # Create multiple Keras models
+    model1 = keras.Sequential([
+        layers.Dense(2, input_shape=(2,)),
+        layers.Dense(1)
+    ])
+    model2 = keras.Sequential([
+        layers.Dense(3, input_shape=(3,)),
+        layers.Dense(2),
+        layers.Dense(1)
+    ])
+
+    # Create some additional objects to save
+    optimizer_state = {'lr': 0.001, 'step': 100}
+    training_metadata = {'epoch': 5, 'loss': 0.123}
+
+    # Store original weights
+    original_weights1 = model1.get_weights()
+    original_weights2 = model2.get_weights()
+
+    async def async_test():
+      with tempfile.TemporaryDirectory() as tmpdir:
+        directory = epath.Path(tmpdir)
+
+        # Async save composite checkpoint
+        save_args = keras_checkpoint_handler.KerasCompositeSaveArgs(
+            items={
+                'model1': model1,
+                'model2': model2,
+                'optimizer': optimizer_state,
+                'metadata': training_metadata
+            }
+        )
+        futures = await self.handler.async_save(directory, save_args)
+        
+        # Wait for async save to complete
+        if futures:
+          for f in futures:
+            f.result()  # Block on result
+
+        # Finalize the save
+        self.handler.finalize(directory)
+
+        # Create new models for restoration
+        new_model1 = keras.Sequential([
+            layers.Dense(2, input_shape=(2,)),
+            layers.Dense(1)
+        ])
+        new_model2 = keras.Sequential([
+            layers.Dense(3, input_shape=(3,)),
+            layers.Dense(2),
+            layers.Dense(1)
+        ])
+
+        # Restore composite checkpoint
+        restore_args = keras_checkpoint_handler.KerasCompositeRestoreArgs(
+            items={
+                'model1': new_model1,
+                'model2': new_model2,
+                'optimizer': None,  # Will restore to saved structure
+                'metadata': None   # Will restore to saved structure
+            }
+        )
+        restored_items = self.handler.restore(directory, restore_args)
+
+        # Verify models were restored correctly
+        restored_weights1 = restored_items['model1'].get_weights()
+        restored_weights2 = restored_items['model2'].get_weights()
+
+        self.assertEqual(len(original_weights1), len(restored_weights1))
+        for orig, rest in zip(original_weights1, restored_weights1):
+          np.testing.assert_array_equal(orig, rest)
+
+        self.assertEqual(len(original_weights2), len(restored_weights2))
+        for orig, rest in zip(original_weights2, restored_weights2):
+          np.testing.assert_array_equal(orig, rest)
+
+        # Verify other objects were restored correctly
+        self.assertEqual(restored_items['optimizer'], optimizer_state)
+        self.assertEqual(restored_items['metadata'], training_metadata)
+
+    asyncio.run(async_test())
+
+  def test_composite_async_save_and_restore_tf(self):
+    """Test async composite save/restore with TensorFlow backend."""
+    self._test_composite_async_save_and_restore_with_backend('tensorflow')
+
+  def test_composite_partial_restore_tf(self):
+    """Test composite partial restore with TensorFlow backend."""
+    current_backend = keras.backend.backend()
+    if current_backend != 'tensorflow':
+      self.skipTest(f"Test requires tensorflow backend, got {current_backend}")
+
+    # Create models and data
+    model1 = keras.Sequential([layers.Dense(2, input_shape=(2,))])
+    model2 = keras.Sequential([layers.Dense(3, input_shape=(3,))])
+    optimizer_state = {'lr': 0.001, 'step': 100}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Save composite checkpoint
+      save_args = keras_checkpoint_handler.KerasCompositeSaveArgs(
+          items={
+              'model1': model1,
+              'model2': model2,
+              'optimizer': optimizer_state
+          }
+      )
+      self.handler.save(directory, save_args)
+
+      # Create new models
+      new_model1 = keras.Sequential([layers.Dense(2, input_shape=(2,))])
+      new_model2 = keras.Sequential([layers.Dense(3, input_shape=(3,))])
+
+      # Partial restore - only restore model1 and optimizer
+      restore_args = keras_checkpoint_handler.KerasCompositeRestoreArgs(
+          items={
+              'model1': new_model1,
+              'optimizer': None  # Will restore to saved structure
+          },
+          partial_restore=True
+      )
+      restored_items = self.handler.restore(directory, restore_args)
+
+      # Verify only requested items were restored
+      self.assertIn('model1', restored_items)
+      self.assertIn('optimizer', restored_items)
+      self.assertNotIn('model2', restored_items)
+
+      # Verify model1 weights match
+      original_weights1 = model1.get_weights()
+      restored_weights1 = restored_items['model1'].get_weights()
+      for orig, rest in zip(original_weights1, restored_weights1):
+        np.testing.assert_array_equal(orig, rest)
+
+      # Verify optimizer state matches
+      self.assertEqual(restored_items['optimizer'], optimizer_state)
+
+  def test_composite_with_transforms_tf(self):
+    """Test composite checkpointing with transforms."""
+    current_backend = keras.backend.backend()
+    if current_backend != 'tensorflow':
+      self.skipTest(f"Test requires tensorflow backend, got {current_backend}")
+
+    # Create a model
+    model = keras.Sequential([layers.Dense(2, input_shape=(2,))])
+    optimizer_state = {'lr': 0.001, 'step': 100}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Save composite checkpoint
+      save_args = keras_checkpoint_handler.KerasCompositeSaveArgs(
+          items={
+              'model': model,
+              'optimizer': optimizer_state
+          }
+      )
+      self.handler.save(directory, save_args)
+
+      # Create new model for restoration
+      new_model = keras.Sequential([layers.Dense(2, input_shape=(2,))])
+
+      # Define transforms for the optimizer state
+      def update_lr(value):
+        return value * 2  # Double the learning rate
+
+      transforms = {
+          'optimizer': {'lr': transform_utils.Transform(value_fn=update_lr)}
+      }
+
+      # Restore with transforms
+      restore_args = keras_checkpoint_handler.KerasCompositeRestoreArgs(
+          items={
+              'model': new_model,
+              'optimizer': {'lr': 0.0, 'step': 0}  # Provide expected structure with default values
+          },
+          restore_args={
+              'model': None,
+              'optimizer': {'lr': type_handlers.RestoreArgs(), 'step': type_handlers.RestoreArgs()}  # Provide proper RestoreArgs for transforms
+          },
+          transforms=transforms
+      )
+      restored_items = self.handler.restore(directory, restore_args)
+
+      # Verify model was restored correctly
+      original_weights = model.get_weights()
+      restored_weights = restored_items['model'].get_weights()
+      for orig, rest in zip(original_weights, restored_weights):
+        np.testing.assert_array_equal(orig, rest)
+
+      # Verify optimizer state was transformed
+      expected_optimizer = {'lr': 0.002, 'step': 100}  # lr doubled
+      self.assertEqual(restored_items['optimizer'], expected_optimizer)
 
 
 if __name__ == '__main__':

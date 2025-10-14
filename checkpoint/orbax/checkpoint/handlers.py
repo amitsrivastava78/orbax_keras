@@ -62,5 +62,8 @@ try:
   from orbax.checkpoint._src.handlers.keras_checkpoint_handler import KerasCheckpointHandler
   from orbax.checkpoint._src.handlers.keras_checkpoint_handler import KerasSaveArgs
   from orbax.checkpoint._src.handlers.keras_checkpoint_handler import KerasRestoreArgs
+  from orbax.checkpoint._src.handlers.keras_checkpoint_handler import KerasCompositeCheckpointHandler
+  from orbax.checkpoint._src.handlers.keras_checkpoint_handler import KerasCompositeSaveArgs
+  from orbax.checkpoint._src.handlers.keras_checkpoint_handler import KerasCompositeRestoreArgs
 except ImportError:
   pass
