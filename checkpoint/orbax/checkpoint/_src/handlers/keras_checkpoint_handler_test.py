@@ -24,8 +24,9 @@ from absl.testing import absltest
 from etils import epath
 import numpy as np
 
-from orbax.checkpoint import handlers
+from orbax.checkpoint import options as options_lib
 from orbax.checkpoint import transform_utils
+from orbax.checkpoint import type_handlers
 from orbax.checkpoint._src.handlers import keras_checkpoint_handler
 
 try:
@@ -438,6 +439,162 @@ class KerasCheckpointHandlerTest(absltest.TestCase):
       self.assertEqual(len(original_weights), len(restored_weights))
       for orig, rest in zip(original_weights, restored_weights):
         np.testing.assert_array_equal(orig, rest)
+
+
+  def test_enhanced_restore_args_jax(self):
+    """Test enhanced restore args support with JAX backend."""
+    current_backend = keras.backend.backend()
+    if current_backend != 'jax':
+      self.skipTest(f"Test requires jax backend, got {current_backend}")
+
+    # Create a simple Keras model
+    model = keras.Sequential([
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
+        layers.Dense(1)
+    ])
+
+    # Set some known weights
+    original_weights = [
+        np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.array([0.1, 0.2], dtype=np.float32),
+        np.array([[5.0], [6.0]], dtype=np.float32),
+        np.array([0.3], dtype=np.float32)
+    ]
+    model.set_weights(original_weights)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Save without enhanced args
+      save_args = keras_checkpoint_handler.KerasSaveArgs(model)
+      self.handler.save(directory, save_args)
+
+      # Create a new model with same architecture
+      new_model = keras.Sequential([
+          keras.Input(shape=(2,)),
+          layers.Dense(2),
+          layers.Dense(1)
+      ])
+
+      # Test with custom restore_args
+      custom_restore_args = [
+          type_handlers.RestoreArgs(),  # Default for weight 0
+          type_handlers.RestoreArgs(),  # Default for weight 1
+          type_handlers.RestoreArgs(),  # Default for weight 2
+          type_handlers.RestoreArgs()   # Default for weight 3
+      ]
+
+      restore_args = keras_checkpoint_handler.KerasRestoreArgs(
+          new_model, 
+          restore_args=custom_restore_args,
+          transforms_default_to_original=True
+      )
+      restored_model = self.handler.restore(directory, restore_args)
+
+      # Check that weights were restored correctly
+      restored_weights = restored_model.get_weights()
+      self.assertEqual(len(original_weights), len(restored_weights))
+      for orig, rest in zip(original_weights, restored_weights):
+        np.testing.assert_array_equal(orig, rest)
+
+
+  def test_multihost_checkpointing_jax(self):
+    """Test multi-host checkpointing support with JAX backend."""
+    current_backend = keras.backend.backend()
+    if current_backend != 'jax':
+      self.skipTest(f"Test requires jax backend, got {current_backend}")
+
+    # Create a simple Keras model
+    model = keras.Sequential([
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
+        layers.Dense(1)
+    ])
+
+    # Set some known weights
+    original_weights = [
+        np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.array([0.1, 0.2], dtype=np.float32),
+        np.array([[5.0], [6.0]], dtype=np.float32),
+        np.array([0.3], dtype=np.float32)
+    ]
+    model.set_weights(original_weights)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Test 1: Primary host (process 0) configuration
+      multiprocessing_options_primary = options_lib.MultiprocessingOptions(
+          primary_host=0,
+          active_processes={0, 1, 2}
+      )
+      handler_primary = keras_checkpoint_handler.KerasCheckpointHandler(
+          multiprocessing_options=multiprocessing_options_primary
+      )
+
+      # Verify primary host is correctly identified
+      self.assertTrue(handler_primary._multiprocessing_options.primary_host == 0)
+      self.assertEqual(handler_primary._multiprocessing_options.active_processes, {0, 1, 2})
+
+      # Test 2: Non-primary host (process 1) configuration
+      multiprocessing_options_secondary = options_lib.MultiprocessingOptions(
+          primary_host=0,
+          active_processes={0, 1, 2}
+      )
+      handler_secondary = keras_checkpoint_handler.KerasCheckpointHandler(
+          multiprocessing_options=multiprocessing_options_secondary
+      )
+
+      # Both handlers should have same configuration
+      self.assertEqual(handler_primary._multiprocessing_options.primary_host,
+                      handler_secondary._multiprocessing_options.primary_host)
+      self.assertEqual(handler_primary._multiprocessing_options.active_processes,
+                      handler_secondary._multiprocessing_options.active_processes)
+
+      # Test 3: Save operation with primary host handler
+      save_args = keras_checkpoint_handler.KerasSaveArgs(model)
+      handler_primary.save(directory, save_args)
+
+      # Test 4: Restore operation with secondary host handler
+      new_model = keras.Sequential([
+          keras.Input(shape=(2,)),
+          layers.Dense(2),
+          layers.Dense(1)
+      ])
+
+      restore_args = keras_checkpoint_handler.KerasRestoreArgs(new_model)
+      restored_model = handler_secondary.restore(directory, restore_args)
+
+      # Verify that weights were restored correctly across "virtual hosts"
+      restored_weights = restored_model.get_weights()
+      self.assertEqual(len(original_weights), len(restored_weights))
+      for orig, rest in zip(original_weights, restored_weights):
+        np.testing.assert_array_equal(orig, rest)
+
+      # Test 5: Different primary host configuration
+      multiprocessing_options_alt = options_lib.MultiprocessingOptions(
+          primary_host=2,  # Host 2 is primary
+          active_processes={0, 1, 2, 3}
+      )
+      handler_alt = keras_checkpoint_handler.KerasCheckpointHandler(
+          multiprocessing_options=multiprocessing_options_alt
+      )
+
+      self.assertEqual(handler_alt._multiprocessing_options.primary_host, 2)
+      self.assertEqual(handler_alt._multiprocessing_options.active_processes, {0, 1, 2, 3})
+
+      # Test 6: Single host configuration (no multi-host)
+      multiprocessing_options_single = options_lib.MultiprocessingOptions(
+          primary_host=0,
+          active_processes={0}
+      )
+      handler_single = keras_checkpoint_handler.KerasCheckpointHandler(
+          multiprocessing_options=multiprocessing_options_single
+      )
+
+      self.assertEqual(handler_single._multiprocessing_options.primary_host, 0)
+      self.assertEqual(handler_single._multiprocessing_options.active_processes, {0})
 
 
 if __name__ == '__main__':

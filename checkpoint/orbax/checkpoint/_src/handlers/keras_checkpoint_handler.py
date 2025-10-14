@@ -23,6 +23,7 @@ from absl import logging
 from etils import epath
 import numpy as np
 from orbax.checkpoint import checkpoint_args
+from orbax.checkpoint import options as options_lib
 from orbax.checkpoint import transform_utils
 from orbax.checkpoint.checkpoint_args import register_with_handler
 from orbax.checkpoint._src.handlers import async_checkpoint_handler
@@ -52,12 +53,24 @@ class KerasRestoreArgs(checkpoint_args.CheckpointArgs):
   item: Any
   transforms: Optional[Any] = None
   partial_restore: bool = False
+  restore_args: Optional[Any] = None
+  transforms_default_to_original: bool = True
 
 
 class KerasCheckpointHandler(async_checkpoint_handler.AsyncCheckpointHandler):
   """Handler for saving and restoring Keras models."""
 
-  def __init__(self):
+  def __init__(
+      self,
+      multiprocessing_options: options_lib.MultiprocessingOptions = options_lib.MultiprocessingOptions()
+  ):
+    """Creates KerasCheckpointHandler.
+
+    Args:
+      multiprocessing_options: Options for multiprocessing/multihost support.
+        See orbax.checkpoint.options.MultiprocessingOptions for details.
+    """
+    self._multiprocessing_options = multiprocessing_options
     self._pytree_handler = None
 
   def save(self, directory: epath.Path, args: KerasSaveArgs) -> Any:
@@ -74,7 +87,9 @@ class KerasCheckpointHandler(async_checkpoint_handler.AsyncCheckpointHandler):
     if backend in ['jax', 'tensorflow', 'torch']:
       # For all backends, use PyTreeCheckpointHandler to save model weights
       # Keras 3.0 get_weights() returns numpy arrays regardless of backend
-      self._pytree_handler = pytree_checkpoint_handler.PyTreeCheckpointHandler()
+      self._pytree_handler = pytree_checkpoint_handler.PyTreeCheckpointHandler(
+          multiprocessing_options=self._multiprocessing_options
+      )
       weights = model.get_weights()
       pytree_save_args = PyTreeSaveArgs(item=weights, custom_metadata=args.custom_metadata)
       self._pytree_handler.save(directory, args=pytree_save_args)
@@ -97,7 +112,9 @@ class KerasCheckpointHandler(async_checkpoint_handler.AsyncCheckpointHandler):
     if backend in ['jax', 'tensorflow', 'torch']:
       # For all backends, use PyTreeCheckpointHandler to save model weights
       # Keras 3.0 get_weights() returns numpy arrays regardless of backend
-      self._pytree_handler = pytree_checkpoint_handler.PyTreeCheckpointHandler()
+      self._pytree_handler = pytree_checkpoint_handler.PyTreeCheckpointHandler(
+          multiprocessing_options=self._multiprocessing_options
+      )
       weights = model.get_weights()
       pytree_save_args = PyTreeSaveArgs(item=weights, custom_metadata=args.custom_metadata)
       futures = await self._pytree_handler.async_save(directory, args=pytree_save_args)
@@ -114,27 +131,34 @@ class KerasCheckpointHandler(async_checkpoint_handler.AsyncCheckpointHandler):
     if backend in ['jax', 'tensorflow', 'torch']:
       # For all backends, use PyTreeCheckpointHandler to restore weights
       # Keras 3.0 set_weights() accepts numpy arrays regardless of backend
-      pytree_handler = pytree_checkpoint_handler.PyTreeCheckpointHandler()
+      pytree_handler = pytree_checkpoint_handler.PyTreeCheckpointHandler(
+          multiprocessing_options=self._multiprocessing_options
+      )
       if args.transforms is not None:
         # If transforms are provided, we need to specify the target structure
         # Use the model's current weights as the target structure for transforms
         target_weights = args.item.get_weights()
-        # Also need to provide restore_args matching the target structure
-        restore_args = [type_handlers.RestoreArgs() for _ in target_weights]
+        # Use provided restore_args or create default ones
+        restore_args = args.restore_args
+        if restore_args is None:
+          restore_args = [type_handlers.RestoreArgs() for _ in target_weights]
         pytree_restore_args = pytree_checkpoint_handler.PyTreeRestoreArgs(
             item=target_weights, 
             transforms=args.transforms, 
             restore_args=restore_args,
-            partial_restore=args.partial_restore
+            partial_restore=args.partial_restore,
+            transforms_default_to_original=args.transforms_default_to_original
         )
         restored_weights = pytree_handler.restore(directory, args=pytree_restore_args)
       else:
-        if args.partial_restore:
-          # For partial restore without transforms, we still need to provide the target structure
+        if args.partial_restore or args.restore_args is not None:
+          # For partial restore or custom restore_args, we need to provide the target structure
           target_weights = args.item.get_weights()
           pytree_restore_args = pytree_checkpoint_handler.PyTreeRestoreArgs(
               item=target_weights,
-              partial_restore=args.partial_restore
+              restore_args=args.restore_args,
+              partial_restore=args.partial_restore,
+              transforms_default_to_original=args.transforms_default_to_original
           )
           restored_weights = pytree_handler.restore(directory, args=pytree_restore_args)
         else:
