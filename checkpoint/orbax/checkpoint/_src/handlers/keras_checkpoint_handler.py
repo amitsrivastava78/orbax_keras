@@ -51,6 +51,7 @@ class KerasRestoreArgs(checkpoint_args.CheckpointArgs):
   """Arguments for restoring Keras models."""
   item: Any
   transforms: Optional[Any] = None
+  partial_restore: bool = False
 
 
 class KerasCheckpointHandler(async_checkpoint_handler.AsyncCheckpointHandler):
@@ -120,9 +121,24 @@ class KerasCheckpointHandler(async_checkpoint_handler.AsyncCheckpointHandler):
         target_weights = args.item.get_weights()
         # Also need to provide restore_args matching the target structure
         restore_args = [type_handlers.RestoreArgs() for _ in target_weights]
-        restored_weights = pytree_handler.restore(directory, item=target_weights, transforms=args.transforms, restore_args=restore_args)
+        pytree_restore_args = pytree_checkpoint_handler.PyTreeRestoreArgs(
+            item=target_weights, 
+            transforms=args.transforms, 
+            restore_args=restore_args,
+            partial_restore=args.partial_restore
+        )
+        restored_weights = pytree_handler.restore(directory, args=pytree_restore_args)
       else:
-        restored_weights = pytree_handler.restore(directory)
+        if args.partial_restore:
+          # For partial restore without transforms, we still need to provide the target structure
+          target_weights = args.item.get_weights()
+          pytree_restore_args = pytree_checkpoint_handler.PyTreeRestoreArgs(
+              item=target_weights,
+              partial_restore=args.partial_restore
+          )
+          restored_weights = pytree_handler.restore(directory, args=pytree_restore_args)
+        else:
+          restored_weights = pytree_handler.restore(directory)
       # Set weights on the model
       args.item.set_weights(restored_weights)
       return args.item

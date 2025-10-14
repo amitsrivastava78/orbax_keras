@@ -432,6 +432,53 @@ class KerasCheckpointHandlerPyTorchTest(absltest.TestCase):
       # but the metadata is saved with the checkpoint
 
 
+  def test_partial_restore_torch(self):
+    """Test partial restore support with PyTorch backend."""
+    current_backend = keras.backend.backend()
+    if current_backend != 'torch':
+      self.skipTest(f"Test requires torch backend, got {current_backend}")
+
+    # Create a simple Keras model
+    model = keras.Sequential([
+        keras.Input(shape=(2,)),
+        layers.Dense(2),
+        layers.Dense(1)
+    ])
+
+    # Set some known weights
+    original_weights = [
+        np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        np.array([0.1, 0.2], dtype=np.float32),
+        np.array([[5.0], [6.0]], dtype=np.float32),
+        np.array([0.3], dtype=np.float32)
+    ]
+    model.set_weights(original_weights)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      directory = epath.Path(tmpdir)
+
+      # Save without partial restore
+      save_args = keras_checkpoint_handler.KerasSaveArgs(model)
+      self.handler.save(directory, save_args)
+
+      # Create a new model with same architecture
+      new_model = keras.Sequential([
+          keras.Input(shape=(2,)),
+          layers.Dense(2),
+          layers.Dense(1)
+      ])
+
+      # Restore with partial_restore=True
+      restore_args = keras_checkpoint_handler.KerasRestoreArgs(new_model, partial_restore=True)
+      restored_model = self.handler.restore(directory, restore_args)
+
+      # Check that weights were restored correctly (should be identical to original)
+      restored_weights = restored_model.get_weights()
+      self.assertEqual(len(original_weights), len(restored_weights))
+      for orig, rest in zip(original_weights, restored_weights):
+        np.testing.assert_array_equal(orig, rest)
+
+
 if __name__ == '__main__':
   absltest.main()
 
